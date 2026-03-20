@@ -87,8 +87,13 @@ const insertInventory = async (
   if (isDebit) debit = amount;
   else credit = amount;
 
-  const closing = opening - debit + credit;
+ const openingNum = Number(opening);
+const debitNum = Number(debit);
+const creditNum = Number(credit);
 
+const closing = openingNum - debitNum + creditNum;
+
+  console.log('closing - ',closing);  
   await pool.request()
     .input("Branch", sql.VarChar, branch)
     .input("VoucherNo", sql.VarChar, voucher)
@@ -211,7 +216,7 @@ if(Type === "Expenses") {
   VoucherNo,
   null,
   "Receipt",
-    convert.toNumber(Amount),
+  Amount,
   false,
   ExpenseCategory,
     req.body.CreatedBy || req.body.VoucherNo.split("/")[0] // Fallback to branch code from voucher
@@ -466,19 +471,56 @@ router.post("/suspense/save", async (req, res) => {
 });
 
 
-router.get("/inventory/:branch", async (req, res) => {
+// router.get("/inventory/:branch", async (req, res) => {
 
+//   const pool = await getConnection();
+
+//   const result = await pool.request()
+//     .input("Branch", sql.VarChar, req.params.branch)
+//     .query(`
+//       SELECT * FROM CashInventory
+//       WHERE Branch=@Branch
+//       ORDER BY Id DESC
+//     `);
+
+//   res.json(result.recordset);
+// });
+
+router.get("/inventory/:branch", async (req, res) => {
   const pool = await getConnection();
 
-  const result = await pool.request()
-    .input("Branch", sql.VarChar, req.params.branch)
-    .query(`
-      SELECT * FROM CashInventory
-      WHERE Branch=@Branch
-      ORDER BY Id DESC
-    `);
+  const { fromDate, toDate } = req.query;
 
-  res.json(result.recordset);
+  try {
+    const request = pool.request()
+      .input("Branch", sql.VarChar, req.params.branch);
+
+    let query = `
+      SELECT * FROM CashInventory
+      WHERE Branch = @Branch
+    `;
+
+    // 🔥 Apply Date Filter
+    if (fromDate && toDate) {
+      query += `
+        AND CAST(TranDate AS DATE) BETWEEN @FromDate AND @ToDate
+      `;
+
+      request
+        .input("FromDate", sql.Date, fromDate)
+        .input("ToDate", sql.Date, toDate);
+    }
+
+    query += ` ORDER BY Id DESC`;
+
+    const result = await request.query(query);
+
+    res.json(result.recordset);
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).send("Server Error");
+  }
 });
 
 //========================================== EXPORT ==========================================
