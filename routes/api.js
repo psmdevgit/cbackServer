@@ -87,8 +87,13 @@ const insertInventory = async (
   if (isDebit) debit = amount;
   else credit = amount;
 
-  const closing = opening - debit + credit;
+ const openingNum = Number(opening);
+const debitNum = Number(debit);
+const creditNum = Number(credit);
 
+const closing = openingNum - debitNum + creditNum;
+
+  console.log('closing - ',closing);  
   await pool.request()
     .input("Branch", sql.VarChar, branch)
     .input("VoucherNo", sql.VarChar, voucher)
@@ -211,7 +216,7 @@ if(Type === "Expenses") {
   VoucherNo,
   null,
   "Receipt",
-    convert.toNumber(Amount),
+ Amount,
   false,
   ExpenseCategory,
     req.body.CreatedBy || req.body.VoucherNo.split("/")[0] // Fallback to branch code from voucher
@@ -366,60 +371,64 @@ router.post("/suspense/save", async (req, res) => {
 
     const branch = VoucherNo.split("/")[0];
 
-    // 🔥 1. CHECK IF ALREADY SUBMITTED
+    // 🔥 1. CHECK STATUS
     const check = await pool.request()
       .input("VoucherNo", sql.VarChar, VoucherNo)
-      .query(`SELECT Status FROM SuspenseEntry WHERE VoucherNo=@VoucherNo`);
+      .query(`SELECT Status, AdvanceAmount FROM SuspenseEntry WHERE VoucherNo=@VoucherNo`);
 
     if (check.recordset[0]?.Status === "Completed") {
       return res.status(400).send("Already submitted!");
     }
 
-    // 🔥 2. GET LAST NUMBER (ONLY ONCE)
-    const last = await pool.request()
-      .input("voucher", sql.VarChar, VoucherNo)
+    const advanceAmount = check.recordset[0].AdvanceAmount;
+
+    // 🔥 2. GET LAST EXP VOUCHER (GLOBAL)
+    const lastVoucher = await pool.request()
+      .input("branch", sql.VarChar, branch)
       .query(`
-        SELECT TOP 1 SuspenseId
-        FROM SuspenseDetails
-        WHERE VoucherNo = @voucher
+        SELECT TOP 1 VoucherNo 
+        FROM CashboxExpenses
+        WHERE VoucherNo LIKE @branch + '/EXP/%'
         ORDER BY Id DESC
       `);
 
     let nextNo = 1;
 
-    if (last.recordset.length > 0 && last.recordset[0].SuspenseId) {
-      nextNo = parseInt(last.recordset[0].SuspenseId.split("/")[2]) + 1;
+    if (lastVoucher.recordset.length > 0) {
+      const last = lastVoucher.recordset[0].VoucherNo;
+      nextNo = parseInt(last.split("/")[2]) + 1;
     }
 
     let generatedIds = [];
+    let totalUsed = 0;
 
-    // 🔥 3. SINGLE LOOP ONLY
+    // 🔥 3. LOOP
     for (let row of rows) {
 
-      const newId = `${branch}/EXP/${String(nextNo).padStart(3, "0")}`;
+      const newVoucher = `${branch}/EXP/${String(nextNo).padStart(3, "0")}`;
       nextNo++;
 
-      generatedIds.push(newId);
+      generatedIds.push(newVoucher);
+      totalUsed += Number(row.Amount);
 
       // ✅ Insert SuspenseDetails
       await pool.request()
-        .input("SuspenseId", sql.VarChar, newId)
+        .input("SuspenseId", sql.VarChar, newVoucher)
         .input("VoucherNo", sql.VarChar, VoucherNo)
         .input("ExpenseCategory", sql.VarChar, row.ExpenseCategory)
         .input("LedgerName", sql.VarChar, row.LedgerName)
         .input("Amount", sql.Decimal(18,2), row.Amount)
         .input("ApprovedBy", sql.VarChar, row.ApprovedBy)
-        .input("Status", sql.VarChar, "Completed")
         .query(`
           INSERT INTO SuspenseDetails
-          (SuspenseId, VoucherNo, ExpenseCategory, LedgerName, Amount, ApprovedBy, Status)
+          (SuspenseId, VoucherNo, ExpenseCategory, LedgerName, Amount, ApprovedBy)
           VALUES
-          (@SuspenseId, @VoucherNo, @ExpenseCategory, @LedgerName, @Amount, @ApprovedBy, @Status)
+          (@SuspenseId, @VoucherNo, @ExpenseCategory, @LedgerName, @Amount, @ApprovedBy)
         `);
 
       // ✅ Insert CashboxExpenses
       await pool.request()
-        .input("VoucherNo", sql.VarChar, newId)
+        .input("VoucherNo", sql.VarChar, newVoucher)
         .input("Type", sql.VarChar, "Expenses")
         .input("ExpenseCategory", sql.VarChar, row.ExpenseCategory)
         .input("EmployeeCode", sql.VarChar, null)
@@ -430,33 +439,64 @@ router.post("/suspense/save", async (req, res) => {
         .input("Purpose", sql.VarChar, "From Suspense")
         .query(`
           INSERT INTO CashboxExpenses
-          (VoucherNo, Type,ExpenseCategory,EmployeeCode,Date, ApprovedBy, LedgerName, Amount, Purpose)
+          (VoucherNo, Type, ExpenseCategory, EmployeeCode, Date, ApprovedBy, LedgerName, Amount, Purpose)
           VALUES
           (@VoucherNo, @Type, @ExpenseCategory, @EmployeeCode, @Date, @ApprovedBy, @LedgerName, @Amount, @Purpose)
         `);
     }
 
-    // 🔥 4. UPDATE MASTER STATUS
+    // 🔥 4. CALCULATE BALANCE
+    const remaining = advanceAmount - totalUsed;
+
+    if (remaining < 0) {
+      return res.status(400).send("Amount exceeds advance!");
+    }
+
+    // 🔥 5. UPDATE MASTER
     await pool.request()
       .input("VoucherNo", sql.VarChar, VoucherNo)
+      .input("UsedAmount", sql.Decimal(18,2), totalUsed)
+      .input("RemainingAmount", sql.Decimal(18,2), remaining)
       .query(`
         UPDATE SuspenseEntry
-        SET Status='Completed'
+        SET 
+          UsedAmount = @UsedAmount,
+          -- RemainingAmount = @RemainingAmount,
+          Status = 'Completed'
         WHERE VoucherNo=@VoucherNo
       `);
 
+    // 🔥 6. INVENTORY UPDATE
+
+    // 👉 Expense (Debit)
+    await insertInventory(
+      pool,
+      branch,
+      VoucherNo,
+      null,
+      "SUSPENSE_USED",
+      totalUsed,
+      true,
+      "Used from Suspense",
+       VoucherNo.split("/")[0] 
+    );
+
+    // 👉 Remaining Return (Credit)
+    if (remaining > 0) {
       await insertInventory(
         pool,
         branch,
-        VoucherNo,  
-        null,            
-        "Suspense Settlement",
-        rows.reduce((sum, r) => sum + Number(r.Amount || 0), 0),
+        VoucherNo,
+        null,
+        "SUSPENSE_RETURN",
+        remaining,
         false,
-        "Settled from Suspense",
-        req.body.CreatedBy || VoucherNo.split("/")[0]  
-      );    
-     
+        "Returned unused suspense",
+        VoucherNo.split("/")[0] 
+
+      );
+    }
+
     res.json({ ids: generatedIds });
 
   } catch (err) {
@@ -464,7 +504,6 @@ router.post("/suspense/save", async (req, res) => {
     res.status(500).send(err.message);
   }
 });
-
 
 router.get("/inventory/:branch", async (req, res) => {
 
@@ -481,6 +520,155 @@ router.get("/inventory/:branch", async (req, res) => {
   res.json(result.recordset);
 });
 
+
+router.get("/cash-summary", async (req, res) => {
+  const { fromDate, toDate } = req.query;
+  const pool = await getConnection();
+
+  const expenses = await pool.request()
+    .input("fromDate", sql.Date, fromDate)
+    .input("toDate", sql.Date, toDate)
+    .query(`
+      SELECT ISNULL(SUM(Amount),0) AS total
+      FROM CashBoxExpenses
+      WHERE Date BETWEEN @fromDate AND @toDate and Type in('Expenses')
+    `);
+
+  const suspense = await pool.request()
+    .input("fromDate", sql.Date, fromDate)
+    .input("toDate", sql.Date, toDate)
+    .query(`
+      SELECT ISNULL(SUM(AdvanceAmount),0) AS total
+      FROM SuspenseEntry
+      WHERE usedAmount > 0 and status <>'Completed'
+      AND CreatedDate BETWEEN @fromDate AND @toDate
+    `);
+
+  res.json({
+    expenses: expenses.recordset[0].total,
+    suspense: suspense.recordset[0].total
+  });
+});
+
+
+router.post("/cash-entry", async (req, res) => {
+  const { fromDate, toDate, opening, expenses, suspense, handCash } = req.body;
+  const pool = await getConnection();
+
+  await pool.request()
+    .input("fromDate", sql.Date, fromDate)
+    .input("toDate", sql.Date, toDate)
+    .input("opening", sql.Decimal, opening)
+    .input("expenses", sql.Decimal, expenses)
+    .input("suspense", sql.Decimal, suspense)
+    .input("handCash", sql.Decimal, handCash)
+    .input("status", sql.VarChar, "Pending L1")
+    .query(`
+      INSERT INTO CashEntry
+      (FromDate, ToDate, Opening, Expenses, Suspense, HandCash, Status)
+      VALUES (@fromDate, @toDate, @opening, @expenses, @suspense, @handCash, @status)
+    `);
+
+  res.send("Saved");
+});
+router.get("/cash-entry-list", async (req, res) => {
+  try {
+    const pool = await getConnection();
+
+    const { branch } = req.query; // optional filter
+
+    let query = `
+      SELECT 
+        Id,
+       CONVERT(VARCHAR, FromDate, 105) AS FromDate,
+  CONVERT(VARCHAR, ToDate, 105) AS ToDate,
+        Opening,
+        Expenses,
+        Suspense,
+        HandCash,
+        Status,
+        CreatedDate
+      FROM CashEntry
+    `;
+
+    // 🔹 Branch Filter (if passed)
+    if (branch) {
+      query += ` WHERE Branch = @branch`;
+    }
+
+    query += ` ORDER BY Id DESC`;
+
+    const request = pool.request();
+
+    if (branch) {
+      request.input("branch", sql.VarChar, branch);
+    }
+
+    const result = await request.query(query);
+
+    res.json(result.recordset);
+
+  } catch (err) {
+    console.log("CASH ENTRY LIST ERROR:", err);
+    res.status(500).json({
+      status: "error",
+      message: err.message
+    });
+  }
+});
+
+router.post("/approve-l1/:id", async (req, res) => {
+  const pool = await getConnection();
+  await pool.request()
+    .input("id", sql.Int, req.params.id)
+    .query(`UPDATE CashEntry SET Status='Approved L1' WHERE Id=@id`);
+  res.send("L1 Approved");
+});
+
+router.post("/approve-l2/:id", async (req, res) => {
+  const pool = await getConnection();
+  await pool.request()
+    .input("id", sql.Int, req.params.id)
+    .query(`UPDATE CashEntry SET Status='Completed' WHERE Id=@id`);
+  res.send("L2 Approved");
+});
 //========================================== EXPORT ==========================================
+
+router.get("/expense-summary", async (req, res) => {
+  try {
+    const pool = await getConnection();
+
+    let { fromDate, toDate } = req.query;
+
+   
+    // 🔥 Ensure proper JS Date conversion (important)
+    fromDate = new Date(fromDate);
+    toDate = new Date(toDate);
+ console.log("FromDate - ToDate:", fromDate, "-", toDate);
+
+    const result = await pool.request()
+      .input("fromDate", sql.Date, fromDate)
+      .input("toDate", sql.Date, toDate)
+      .query(`
+        SELECT 
+          ExpenseCategory,
+          SUM(Amount) AS TotalAmount
+        FROM CashboxExpenses
+        WHERE Type in('Expenses')
+          AND Date >= @fromDate
+          AND Date < DATEADD(DAY, 1, @toDate)
+        GROUP BY ExpenseCategory
+        ORDER BY ExpenseCategory
+      `);
+
+    console.log("Result:", result.recordset);
+
+    res.json(result.recordset);
+
+  } catch (err) {
+    console.log("SUMMARY ERROR:", err);
+    res.status(500).send(err.message);
+  }
+});
 
 module.exports = router;
