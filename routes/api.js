@@ -68,6 +68,22 @@ const getLastBalance = async (pool, branch) => {
   return opening.recordset[0].OpeningBalance;
 };
 
+const getEmpCode = async (pool, voucherNo) => {
+  const result = await pool.request()
+    .input("voucher", sql.VarChar, voucherNo)
+    .query(`
+      SELECT EmployeeCode
+      FROM CashboxExpenses
+      WHERE VoucherNo = @voucher
+    `);
+
+  if (result.recordset.length > 0) {
+    return result.recordset[0].EmployeeCode;
+  }
+
+};
+
+
 const insertInventory = async (
   pool,
   branch,
@@ -88,13 +104,35 @@ const insertInventory = async (
   if (isDebit) debit = amount;
   else credit = amount;
 
- const openingNum = Number(opening);
-const debitNum = Number(debit);
-const creditNum = Number(credit);
+//  const openingNum = Number(opening);
+// const debitNum = Number(debit);
+// const creditNum = Number(credit);
 
-const closing = openingNum - debitNum + creditNum;
 
-  console.log('closing - ',closing);  
+// const closing = openingNum - debitNum + creditNum;
+
+  const openingNum = Number(opening);
+  const debitNum = Number(debit);
+  const creditNum = Number(credit);
+
+  let closing = 0;
+
+  // ✅ Custom logic
+  if (type === "SUSPENSE_USED") {
+    // ❌ No balance change
+    closing = openingNum;
+  } 
+  else if (type === "SUSPENSE_RETURN") {
+    // ✅ Add returned amount
+    closing = openingNum + creditNum;
+  } 
+  else {
+    // ✅ Default logic
+    closing = openingNum - debitNum + creditNum;
+  }
+
+  console.log("closing - ", closing);
+
   await pool.request()
     .input("Branch", sql.VarChar, branch)
     .input("VoucherNo", sql.VarChar, voucher)
@@ -381,6 +419,12 @@ router.post("/suspense/save", async (req, res) => {
 
     const branch = VoucherNo.split("/")[0];
 
+    // console.log(VoucherNo,rows,branch);
+
+    
+  const EmployeeCode = await getEmpCode(pool, VoucherNo);
+
+
     // 🔥 1. CHECK STATUS
     const check = await pool.request()
       .input("VoucherNo", sql.VarChar, VoucherNo)
@@ -442,7 +486,7 @@ router.post("/suspense/save", async (req, res) => {
         .input("VoucherNo", sql.VarChar, newVoucher)
         .input("Type", sql.VarChar, "Expenses")
         .input("ExpenseCategory", sql.VarChar, row.ExpenseCategory)
-        .input("EmployeeCode", sql.VarChar, null)
+        .input("EmployeeCode", sql.VarChar, EmployeeCode)
         .input("Date", sql.Date, new Date())
         .input("ApprovedBy", sql.VarChar, row.ApprovedBy)
         .input("LedgerName", sql.VarChar, row.LedgerName)
@@ -473,7 +517,7 @@ router.post("/suspense/save", async (req, res) => {
         UPDATE SuspenseEntry
         SET 
           UsedAmount = @UsedAmount,
-          -- RemainingAmount = @RemainingAmount,
+          --RemainingAmount = @RemainingAmount,
           Status = 'Completed'
         WHERE VoucherNo=@VoucherNo
       `);
@@ -555,6 +599,56 @@ router.get("/inventory/:branch", async (req, res) => {
     res.status(500).send("Server Error");
   }
 });
+// router.get("/dailyTransactions", async (req, res) => {
+//   const pool = await getConnection();
+//   try {
+//     let { fromDate, toDate, branch } = req.query;
+//     branch = branch ? branch.trim() : null;
+
+//     console.log(fromDate,toDate,branch);
+
+//     const request = pool.request();
+
+//     // let query = `SELECT * FROM CashInventory WHERE 1=1`;
+
+//     let query = `  select CI.id as Id,
+// 	  CI.Branch as Branch,
+// 	  CI.TranDate as TranDate,
+// 	  CI.VoucherNo as VoucherNo,
+// 	  CI.RefVoucherNo as RefVoucherNo,
+// 	  CI.TranType as TranType,
+// 	  CI.Description as Description,
+// 	  CE.LedgerName as LedgerName,
+// 	  CI.Debit as Debit,
+// 	  CI.Credit as Credit,
+// 	  Ci.OpeningBalance as OpeningBalance,
+// 	  CI.ClosingBalance as ClosingBalance,
+// 	  CI.CreatedBy as CreatedBy
+// 	  from CashInventory CI
+// 	  inner join CashboxExpenses CE on CE.VoucherNo = CI.VoucherNo WHERE 1=1`
+
+//     if (branch) {
+//       query += ` AND CI.Branch = @branch`;
+//       request.input("branch", sql.NVarChar, branch);
+//     }
+
+//     if (fromDate && toDate) {
+//       query += ` AND CAST(CI.TranDate AS DATE) BETWEEN @FromDate AND @ToDate`;
+//       request.input("FromDate", sql.Date, fromDate);
+//       request.input("ToDate", sql.Date, toDate);
+//     }
+
+//     query += ` ORDER BY CI.Id DESC`;
+
+//     const result = await request.query(query);
+//     res.json(result.recordset);
+
+//   } catch (err) {
+//     console.error(err);
+//     res.status(500).send("Server Error");
+//   }
+// });
+
 router.get("/dailyTransactions", async (req, res) => {
   const pool = await getConnection();
   try {
@@ -567,21 +661,17 @@ router.get("/dailyTransactions", async (req, res) => {
 
     // let query = `SELECT * FROM CashInventory WHERE 1=1`;
 
-    let query = `  select CI.id as Id,
-	  CI.Branch as Branch,
-	  CI.TranDate as TranDate,
+    let query = `  
+		 select CI.id as Id,
+	  CI.branch as Branch,
+	  CI.Date as TranDate,
 	  CI.VoucherNo as VoucherNo,
-	  CI.RefVoucherNo as RefVoucherNo,
-	  CI.TranType as TranType,
-	  CI.Description as Description,
-	  CE.LedgerName as LedgerName,
-	  CI.Debit as Debit,
-	  CI.Credit as Credit,
-	  Ci.OpeningBalance as OpeningBalance,
-	  CI.ClosingBalance as ClosingBalance,
-	  CI.CreatedBy as CreatedBy
-	  from CashInventory CI
-	  inner join CashboxExpenses CE on CE.VoucherNo = CI.VoucherNo WHERE 1=1`
+	  CI.Type as TranType,
+	  CI.ExpenseCategory as Description,
+	  CI.LedgerName as LedgerName,
+	  CI.Amount as Amount,
+	  CI.Purpose as Purpose
+	  from CashboxExpenses CI WHERE 1=1`
 
     if (branch) {
       query += ` AND CI.Branch = @branch`;
@@ -589,7 +679,7 @@ router.get("/dailyTransactions", async (req, res) => {
     }
 
     if (fromDate && toDate) {
-      query += ` AND CAST(CI.TranDate AS DATE) BETWEEN @FromDate AND @ToDate`;
+      query += ` AND CAST(CI.Date AS DATE) BETWEEN @FromDate AND @ToDate`;
       request.input("FromDate", sql.Date, fromDate);
       request.input("ToDate", sql.Date, toDate);
     }
@@ -605,11 +695,63 @@ router.get("/dailyTransactions", async (req, res) => {
   }
 });
 
+router.get("/allSuspenses", async (req, res) => {
+  const pool = await getConnection();
+  try {
+    let { fromDate, toDate, branch } = req.query;
+    branch = branch ? branch.trim() : null;
+
+    console.log(fromDate,toDate,branch);
+
+    const request = pool.request();
+
+    // let query = `SELECT * FROM CashInventory WHERE 1=1`;
+
+    let query = `  
+		 SELECT 
+    --CONVERT(VARCHAR, SD.CreatedDate, 105) AS Date,
+    SD.CreatedDate AS Date,
+    SD.VoucherNo AS VoucherNo,
+	  SD.SuspenseId AS ExpenseID,
+    SD.ExpenseCategory AS Description,
+    SD.LedgerName AS LedgerName,
+    SE.AdvanceAmount AS AdvAmount,
+    SD.Amount AS UsedAmount,
+    SE.branch AS Branch,
+    SD.ApprovedBy AS Approved,
+    SE.status AS Status
+FROM SuspenseDetails SD
+INNER JOIN SuspenseEntry SE 
+    ON SE.VoucherNo = SD.VoucherNo where 1=1`
+
+    if (branch) {
+      query += ` AND SE.branch = @branch`;
+      request.input("branch", sql.NVarChar, branch);
+    }
+
+    if (fromDate && toDate) {
+      query += ` AND CAST(SD.CreatedDate AS DATE) BETWEEN @FromDate AND @ToDate`;
+      request.input("FromDate", sql.Date, fromDate);
+      request.input("ToDate", sql.Date, toDate);
+    }
+
+    query += ` ORDER BY SD.id DESC`;
+
+    const result = await request.query(query);
+    res.json(result.recordset);
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).send("Server Error");
+  }
+});
 
 
 router.get("/cash-summary", async (req, res) => {
   const { fromDate, toDate , userbranch} = req.query;
   const pool = await getConnection();
+
+  console.log(req.query);
 
   const expenses = await pool.request()
     .input("fromDate", sql.Date, fromDate)
@@ -628,8 +770,8 @@ router.get("/cash-summary", async (req, res) => {
     .query(`
       SELECT ISNULL(SUM(AdvanceAmount),0) AS total
       FROM SuspenseEntry
-      WHERE  branch = @branch AND usedAmount > 0 and status <>'Completed'
-      AND CreatedDate BETWEEN @fromDate AND @toDate
+      WHERE  branch = @branch AND usedAmount = 0 and status is null
+      AND cast(CreatedDate as date) BETWEEN @fromDate AND @toDate
     `);
 
   res.json({
