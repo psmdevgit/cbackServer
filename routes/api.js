@@ -2,7 +2,7 @@ const express = require("express");
 const router = express.Router();
 const { sql, getConnection } = require("../db");
 const e = require("express");
-const { NVarChar } = require("mssql");
+const { NVarChar, query } = require("mssql");
 
 //========================================== LOGIN ==========================================
 
@@ -277,7 +277,7 @@ if(Type === "Expenses") {
 }
 
 res.status(200).json({
-    message: "Saved Successfully",
+    message: `${Type} Saved Successfully`,
     id: insertedId
 });
 
@@ -862,6 +862,7 @@ router.get("/cash-entry-list", async (req, res) => {
     let query = `
       SELECT 
         Id,
+		    branch,
         CONVERT(VARCHAR, FromDate, 105) AS FromDate,
         CONVERT(VARCHAR, ToDate, 105) AS ToDate,
         Opening,
@@ -873,7 +874,7 @@ router.get("/cash-entry-list", async (req, res) => {
       FROM CashEntry
       WHERE 1=1
     `;
-    console.log(query);
+    // console.log(query);
 
     const request = pool.request();
 
@@ -933,17 +934,18 @@ router.get("/expense-summary", async (req, res) => {
   try {
     const pool = await getConnection();
 
-    let { fromDate, toDate } = req.query;
+    let { fromDate, toDate, branch } = req.query;
 
    
     // 🔥 Ensure proper JS Date conversion (important)
     fromDate = new Date(fromDate);
     toDate = new Date(toDate);
- console.log("FromDate - ToDate:", fromDate, "-", toDate);
+ console.log("FromDate - ToDate:", fromDate, "-", toDate, branch);
 
     const result = await pool.request()
       .input("fromDate", sql.Date, fromDate)
       .input("toDate", sql.Date, toDate)
+      .input("branch", sql.NVarChar, branch)
       .query(`
         SELECT 
           ExpenseCategory,
@@ -952,10 +954,12 @@ router.get("/expense-summary", async (req, res) => {
         WHERE Type in('Expenses')
           AND Date >= @fromDate
           AND Date < DATEADD(DAY, 1, @toDate)
+          AND branch = @branch
         GROUP BY ExpenseCategory
         ORDER BY ExpenseCategory
       `);
 
+      console.log(query);
     console.log("Result:", result.recordset);
 
     res.json(result.recordset);
