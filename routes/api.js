@@ -1,15 +1,8 @@
 const express = require("express");
 const router = express.Router();
 const { sql, getConnection } = require("../db");
-const e = require("express");
-<<<<<<< HEAD
 const { NVarChar } = require("mssql");
 const ExcelJS = require("exceljs");
-=======
-const { NVarChar, query } = require("mssql");
->>>>>>> 0377bdaf5f48a6282805b7c90b4885037cc0b47d
-
-//========================================== LOGIN ==========================================
 
 router.post("/login", async (req, res) => {
     try {
@@ -72,6 +65,32 @@ const getLastBalance = async (pool, branch) => {
 
   return opening.recordset[0].OpeningBalance;
 };
+
+router.get("/last-entry-date", async (req, res) => {
+  try {
+    const pool = await getConnection();
+    const { branch } = req.query;
+
+    const result = await pool.request()
+      .input("Branch", sql.VarChar, branch)
+      .query(`
+        SELECT TOP 1 ToDate 
+        FROM CashEntry 
+        WHERE Branch = @Branch 
+        ORDER BY CreatedDate DESC
+      `);
+
+    if (result.recordset.length > 0) {
+      res.json({ lastDate: result.recordset[0].ToDate });
+    } else {
+      res.json({ lastDate: null });
+    }
+
+  } catch (err) {
+    console.log(err);
+    res.status(500).send("Error fetching last entry date");
+  }
+});
 
 const getEmpCode = async (pool, voucherNo) => {
   const result = await pool.request()
@@ -420,7 +439,7 @@ console.log("Fetching suspense details for voucher:", voucher);
 router.post("/suspense/save", async (req, res) => {
   try {
     const pool = await getConnection();
-    const { VoucherNo, rows } = req.body;
+    const { VoucherNo, rows, narration } = req.body;
 
     const branch = VoucherNo.split("/")[0];
 
@@ -478,12 +497,13 @@ router.post("/suspense/save", async (req, res) => {
         .input("LedgerName", sql.VarChar, row.LedgerName)
         .input("Amount", sql.Decimal(18,2), row.Amount)
         .input("ApprovedBy", sql.VarChar, row.ApprovedBy)
+        .input("Narration", sql.VarChar, narration)
         .input("Branch", sql.VarChar, branch)
         .query(`
           INSERT INTO SuspenseDetails
-          (SuspenseId, VoucherNo, ExpenseCategory, LedgerName, Amount, ApprovedBy, Branch)
+          (SuspenseId, VoucherNo, ExpenseCategory, LedgerName, Amount, ApprovedBy, Branch, Narration)
           VALUES
-          (@SuspenseId, @VoucherNo, @ExpenseCategory, @LedgerName, @Amount, @ApprovedBy, @Branch)
+          (@SuspenseId, @VoucherNo, @ExpenseCategory, @LedgerName, @Amount, @ApprovedBy, @Branch, @Narration)
         `);
 
       // ✅ Insert CashboxExpenses
@@ -496,7 +516,7 @@ router.post("/suspense/save", async (req, res) => {
         .input("ApprovedBy", sql.VarChar, row.ApprovedBy)
         .input("LedgerName", sql.VarChar, row.LedgerName)
         .input("Amount", sql.Decimal(18,2), row.Amount)
-        .input("Purpose", sql.VarChar, "From Suspense")
+        .input("Purpose", sql.VarChar, narration?.trim() || "From Suspense")
         .input("Branch", sql.VarChar, branch)
         .query(`
           INSERT INTO CashboxExpenses
@@ -667,10 +687,11 @@ router.get("/dailyTransactions", async (req, res) => {
     // let query = `SELECT * FROM CashInventory WHERE 1=1`;
 
     let query = `  
-		 select CI.id as Id,
+	select CI.id as Id,
 	  CI.branch as Branch,
 	  CI.Date as TranDate,
 	  CI.VoucherNo as VoucherNo,
+	  CI.EmployeeCode as EmpID,
 	  CI.Type as TranType,
 	  CI.ExpenseCategory as Description,
 	  CI.LedgerName as LedgerName,
@@ -1059,7 +1080,7 @@ router.get("/expense-summary", async (req, res) => {
         ORDER BY ExpenseCategory
       `);
 
-      console.log(query);
+      // console.log(query);
     console.log("Result:", result.recordset);
 
     res.json(result.recordset);
@@ -1080,7 +1101,7 @@ router.post("/updateDescription", async (req, res) => {
     const now = new Date();
     
     // const { id } = req.params;
-    const { DescriptionId, DescriptionValue, existDescription,existLedgerName, VoucherNo } = req.body;
+    const { DescriptionId, DescriptionValue, existDescription,existLedgerName, VoucherNo, newAmount,newPurpose,Amount,Purpose } = req.body;
 
     console.log(req.body);
 
@@ -1090,7 +1111,7 @@ router.post("/updateDescription", async (req, res) => {
 
     let newLedgerName = '';
     
-     const opening = await pool.request()
+     const nLedgerName = await pool.request()
     .input("id", sql.Int, DescriptionId)
     .query(`
       SELECT LedgerName 
@@ -1098,16 +1119,15 @@ router.post("/updateDescription", async (req, res) => {
       WHERE id = @id
     `);
 
-    if (opening.recordset.length > 0) {
-      newLedgerName = opening.recordset[0].LedgerName;
+    if (nLedgerName.recordset.length > 0) {
+      newLedgerName = nLedgerName.recordset[0].LedgerName;
     }
-
 
     await pool.request()
       .input("vNo", sql.NVarChar, VoucherNo.trim())
       .input("Description", sql.NVarChar, DescriptionValue)
-      .input("ExistDesc", sql.NVarChar, existDescription)
       .input("LedgerName", sql.NVarChar, newLedgerName)
+      .input("ExistDesc", sql.NVarChar, existDescription)
       .input("ExistLedger", sql.NVarChar, existLedgerName)
       .input("today", sql.DateTime, now)
       .query(`
@@ -1123,9 +1143,13 @@ router.post("/updateDescription", async (req, res) => {
       await pool.request()
       .input("vNo", sql.NVarChar, VoucherNo.trim())
       .input("Description", sql.NVarChar, DescriptionValue)
-      .input("ExistDesc", sql.NVarChar, existDescription)
       .input("LedgerName", sql.NVarChar, newLedgerName)
+      .input("ExistDesc", sql.NVarChar, existDescription)
       .input("ExistLedger", sql.NVarChar, existLedgerName)
+      .input("ExistAmount", sql.Int, parseFloat(Amount))
+      .input("ExistPurpose", sql.NVarChar, Purpose)
+      .input("Amount", sql.Int, parseFloat(newAmount))
+      .input("Purpose", sql.NVarChar, newPurpose)
       .input("today", sql.DateTime, now)
       .query(`
         UPDATE CashboxExpenses
@@ -1133,6 +1157,10 @@ router.post("/updateDescription", async (req, res) => {
         LedgerName = @LedgerName,
         ExistCategory = @ExistDesc,
         ExistLedgerName = @ExistLedger,
+        Amount = @Amount,
+        Purpose = @Purpose,
+        ExistAmount = @ExistAmount,
+        ExistPurpose = @ExistPurpose,
         DescUpdateTime = @today
         WHERE VoucherNo = @vNo
       `);
