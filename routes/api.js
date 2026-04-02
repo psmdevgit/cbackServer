@@ -2,8 +2,12 @@ const express = require("express");
 const router = express.Router();
 const { sql, getConnection } = require("../db");
 const e = require("express");
+<<<<<<< HEAD
 const { NVarChar } = require("mssql");
 const ExcelJS = require("exceljs");
+=======
+const { NVarChar, query } = require("mssql");
+>>>>>>> 0377bdaf5f48a6282805b7c90b4885037cc0b47d
 
 //========================================== LOGIN ==========================================
 
@@ -278,7 +282,7 @@ if(Type === "Expenses") {
 }
 
 res.status(200).json({
-    message: "Saved Successfully",
+    message: `${Type} Saved Successfully`,
     id: insertedId
 });
 
@@ -696,57 +700,152 @@ router.get("/dailyTransactions", async (req, res) => {
   }
 });
 
+// router.get("/allSuspenses", async (req, res) => {
+//   const pool = await getConnection();
+//   try {
+//     let { fromDate, toDate, branch } = req.query;
+//     branch = branch ? branch.trim() : null;
+
+//     console.log(fromDate,toDate,branch);
+
+//     const request = pool.request();
+
+//     // let query = `SELECT * FROM CashInventory WHERE 1=1`;
+
+//     let query = `  
+// 		 SELECT 
+//     --CONVERT(VARCHAR, SD.CreatedDate, 105) AS Date,
+//     SD.CreatedDate AS Date,
+//     SD.VoucherNo AS VoucherNo,
+// 	  SD.SuspenseId AS ExpenseID,
+//     SD.ExpenseCategory AS Description,
+//     SD.LedgerName AS LedgerName,
+//     SE.AdvanceAmount AS AdvAmount,
+//     SD.Amount AS UsedAmount,
+//     SE.branch AS Branch,
+//     SD.ApprovedBy AS Approved,
+//     SE.status AS Status
+// FROM SuspenseDetails SD
+// INNER JOIN SuspenseEntry SE 
+//     ON SE.VoucherNo = SD.VoucherNo where 1=1`
+
+//     if (branch) {
+//       query += ` AND SE.branch = @branch`;
+//       request.input("branch", sql.NVarChar, branch);
+//     }
+
+//     if (fromDate && toDate) {
+//       query += ` AND CAST(SD.CreatedDate AS DATE) BETWEEN @FromDate AND @ToDate`;
+//       request.input("FromDate", sql.Date, fromDate);
+//       request.input("ToDate", sql.Date, toDate);
+//     }
+
+//     query += ` ORDER BY SD.id DESC`;
+
+//     const result = await request.query(query);
+//     res.json(result.recordset);
+
+//   } catch (err) {
+//     console.error(err);
+//     res.status(500).send("Server Error");
+//   }
+// });
+
 router.get("/allSuspenses", async (req, res) => {
   const pool = await getConnection();
   try {
     let { fromDate, toDate, branch } = req.query;
     branch = branch ? branch.trim() : null;
 
-    console.log(fromDate,toDate,branch);
 
-    const request = pool.request();
+    const request1 = pool.request(); // for completed
+    const request2 = pool.request(); // for pending
 
-    // let query = `SELECT * FROM CashInventory WHERE 1=1`;
-
-    let query = `  
-		 SELECT 
-    --CONVERT(VARCHAR, SD.CreatedDate, 105) AS Date,
-    SD.CreatedDate AS Date,
-    SD.VoucherNo AS VoucherNo,
-	  SD.SuspenseId AS ExpenseID,
-    SD.ExpenseCategory AS Description,
-    SD.LedgerName AS LedgerName,
-    SE.AdvanceAmount AS AdvAmount,
-    SD.Amount AS UsedAmount,
-    SE.branch AS Branch,
-    SD.ApprovedBy AS Approved,
-    SE.status AS Status
-FROM SuspenseDetails SD
-INNER JOIN SuspenseEntry SE 
-    ON SE.VoucherNo = SD.VoucherNo where 1=1`
+    // ================= COMPLETED =================
+    let queryCompleted = `  
+      SELECT 
+        SD.CreatedDate AS Date,
+        SD.VoucherNo AS VoucherNo,
+        SD.SuspenseId AS ExpenseID,
+        SD.ExpenseCategory AS Description,
+        SD.LedgerName AS LedgerName,
+        SE.AdvanceAmount AS AdvAmount,
+        SD.Amount AS UsedAmount,
+        SE.RemainingAmount AS Balance,
+        SD.branch AS Branch,
+        SD.ApprovedBy AS Approved,
+        'Completed' AS Status,
+		    Cb.EmployeeCode AS EmpID
+      FROM SuspenseDetails SD
+      INNER JOIN SuspenseEntry SE 
+        ON SE.VoucherNo = SD.VoucherNo
+      inner join CashboxExpenses CB
+		    on CB.VoucherNo = SD.VoucherNo
+      WHERE 1=1
+    `;
 
     if (branch) {
-      query += ` AND SE.branch = @branch`;
-      request.input("branch", sql.NVarChar, branch);
+      queryCompleted += ` AND SD.branch = @branch`;
+      request1.input("branch", sql.NVarChar, branch);
     }
 
     if (fromDate && toDate) {
-      query += ` AND CAST(SD.CreatedDate AS DATE) BETWEEN @FromDate AND @ToDate`;
-      request.input("FromDate", sql.Date, fromDate);
-      request.input("ToDate", sql.Date, toDate);
+      queryCompleted += ` AND CAST(SD.CreatedDate AS DATE) BETWEEN @FromDate AND @ToDate`;
+      request1.input("FromDate", sql.Date, fromDate);
+      request1.input("ToDate", sql.Date, toDate);
     }
 
-    query += ` ORDER BY SD.id DESC`;
+    queryCompleted += ` ORDER BY SD.id DESC`;
 
-    const result = await request.query(query);
-    res.json(result.recordset);
+    const completedResult = await request1.query(queryCompleted);
+
+    // ================= PENDING =================
+    let queryPending = `  
+      SELECT 
+        SE.CreatedDate AS Date,
+        SE.VoucherNo AS VoucherNo,
+        '-' AS ExpenseID,
+        CB.ExpenseCategory AS Description,
+        CB.LedgerName AS LedgerName,
+        SE.AdvanceAmount AS AdvAmount,
+        SE.UsedAmount AS UsedAmount,
+        SE.RemainingAmount AS Balance,
+        SE.branch AS Branch,
+        CB.ApprovedBy AS Approved,
+        'Pending' AS Status,
+		Cb.EmployeeCode AS EmpID
+      FROM SuspenseEntry SE
+      INNER JOIN CashboxExpenses CB 
+        ON CB.VoucherNo = SE.VoucherNo
+      WHERE SE.RemainingAmount > 0
+    `;
+
+    if (branch) {
+      queryPending += ` AND SE.branch = @branch`;
+      request2.input("branch", sql.NVarChar, branch);
+    }
+
+    if (fromDate && toDate) {
+      queryPending += ` AND CAST(SE.CreatedDate AS DATE) BETWEEN @FromDate AND @ToDate`;
+      request2.input("FromDate", sql.Date, fromDate);
+      request2.input("ToDate", sql.Date, toDate);
+    }
+
+    queryPending += ` ORDER BY SE.id DESC`;
+
+    const pendingResult = await request2.query(queryPending);
+
+    // ================= RESPONSE =================
+    res.json({
+      completed: completedResult.recordset,
+      pending: pendingResult.recordset
+    });
 
   } catch (err) {
     console.error(err);
     res.status(500).send("Server Error");
   }
 });
-
 
 router.get("/cash-summary", async (req, res) => {
   const { fromDate, toDate , userbranch} = req.query;
@@ -863,6 +962,7 @@ router.get("/cash-entry-list", async (req, res) => {
     let query = `
       SELECT 
         Id,
+		    branch,
         CONVERT(VARCHAR, FromDate, 105) AS FromDate,
         CONVERT(VARCHAR, ToDate, 105) AS ToDate,
         Opening,
@@ -874,7 +974,7 @@ router.get("/cash-entry-list", async (req, res) => {
       FROM CashEntry
       WHERE 1=1
     `;
-    console.log(query);
+    // console.log(query);
 
     const request = pool.request();
 
@@ -934,17 +1034,18 @@ router.get("/expense-summary", async (req, res) => {
   try {
     const pool = await getConnection();
 
-    let { fromDate, toDate } = req.query;
+    let { fromDate, toDate, branch } = req.query;
 
    
     // 🔥 Ensure proper JS Date conversion (important)
     fromDate = new Date(fromDate);
     toDate = new Date(toDate);
- console.log("FromDate - ToDate:", fromDate, "-", toDate);
+ console.log("FromDate - ToDate:", fromDate, "-", toDate, branch);
 
     const result = await pool.request()
       .input("fromDate", sql.Date, fromDate)
       .input("toDate", sql.Date, toDate)
+      .input("branch", sql.NVarChar, branch)
       .query(`
         SELECT 
           ExpenseCategory,
@@ -953,10 +1054,12 @@ router.get("/expense-summary", async (req, res) => {
         WHERE Type in('Expenses')
           AND Date >= @fromDate
           AND Date < DATEADD(DAY, 1, @toDate)
+          AND branch = @branch
         GROUP BY ExpenseCategory
         ORDER BY ExpenseCategory
       `);
 
+      console.log(query);
     console.log("Result:", result.recordset);
 
     res.json(result.recordset);
