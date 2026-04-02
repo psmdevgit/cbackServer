@@ -2,7 +2,12 @@ const express = require("express");
 const router = express.Router();
 const { sql, getConnection } = require("../db");
 const e = require("express");
+<<<<<<< HEAD
+const { NVarChar } = require("mssql");
+const ExcelJS = require("exceljs");
+=======
 const { NVarChar, query } = require("mssql");
+>>>>>>> 0377bdaf5f48a6282805b7c90b4885037cc0b47d
 
 //========================================== LOGIN ==========================================
 
@@ -1158,4 +1163,162 @@ router.post("/updateDescription", async (req, res) => {
 });
 
 
+
+router.post("/expense-report", async (req, res) => {
+  try {
+
+    console.log("Generating expense report with filters:", req.body);
+    const { branch, category, fromDate, toDate } = req.body;
+
+    const pool = await getConnection();
+
+    // Step 1: Get dynamic branches
+    let branchQuery = `
+      SELECT DISTINCT Branch 
+      FROM CashboxExpenses
+    `;
+
+    const branchResult = await pool.request().query(branchQuery);
+
+    const branches = branchResult.recordset.map(b => `[${b.Branch}]`).join(",");
+
+    // Step 2: Build dynamic pivot query
+    let query = `
+      SELECT ExpenseCategory, ${branches}
+      FROM
+      (
+        SELECT ExpenseCategory, Branch, Amount
+        FROM CashboxExpenses
+        WHERE ExpenseCategory <> 'Suspenses'
+        ${branch ? "AND Branch = @Branch" : ""}
+        ${category ? "AND ExpenseCategory = @Category" : ""}
+        ${fromDate ? "AND CAST(Date AS DATE) >= @FromDate" : ""}
+        ${toDate ? "AND CAST(Date AS DATE) <= @ToDate" : ""}
+      ) AS SourceTable
+      PIVOT
+      (
+        SUM(Amount)
+        FOR Branch IN (${branches})
+      ) AS PivotTable
+      ORDER BY ExpenseCategory
+    `;
+
+    const request = pool.request();
+
+    if (branch) request.input("Branch", sql.VarChar, branch);
+    if (category) request.input("Category", sql.VarChar, category);
+    if (fromDate) request.input("FromDate", sql.Date, fromDate);
+    if (toDate) request.input("ToDate", sql.Date, toDate);
+
+    const result = await request.query(query);
+
+    res.json(result.recordset);
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).send("Server Error");
+  }
+});
+
+router.get("/filters", async (req, res) => {
+  try {
+    const pool = await getConnection();
+
+    const branches = await pool.request().query(`
+      SELECT DISTINCT Branch FROM CashboxExpenses
+    `);
+
+    const categories = await pool.request().query(`
+      SELECT DISTINCT ExpenseCategory FROM CashboxExpenses
+      WHERE ExpenseCategory <> 'Suspenses'
+    `);
+
+    res.json({
+      branches: branches.recordset.map(b => b.Branch),
+      categories: categories.recordset.map(c => c.ExpenseCategory)
+    });
+
+  } catch (err) {
+    res.status(500).send(err.message);
+  }
+});
+
+
+router.get("/export-excel", async (req, res) => {
+
+  console.log("Exporting Excel with filters:", req.query);  
+  try {
+    const { branch, category, fromDate, toDate } = req.query;
+
+    const pool = await getConnection();
+
+    // same pivot logic
+    const branchResult = await pool.request().query(`
+      SELECT DISTINCT Branch FROM CashboxExpenses
+    `);
+
+    const branches = branchResult.recordset.map(b => `[${b.Branch}]`).join(",");
+
+    let query = `
+      SELECT ExpenseCategory, ${branches}
+      FROM
+      (
+        SELECT ExpenseCategory, Branch, Amount
+        FROM CashboxExpenses
+        WHERE ExpenseCategory <> 'Suspenses'
+        ${branch ? "AND Branch = @Branch" : ""}
+        ${category ? "AND ExpenseCategory = @Category" : ""}
+        ${fromDate ? "AND CAST(Date AS DATE) >= @FromDate" : ""}
+        ${toDate ? "AND CAST(Date AS DATE) <= @ToDate" : ""}
+      ) AS SourceTable
+      PIVOT
+      (
+        SUM(Amount)
+        FOR Branch IN (${branches})
+      ) AS PivotTable
+    `;
+
+    const request = pool.request();
+
+    if (branch) request.input("Branch", sql.VarChar, branch);
+    if (category) request.input("Category", sql.VarChar, category);
+    if (fromDate) request.input("FromDate", sql.Date, fromDate);
+    if (toDate) request.input("ToDate", sql.Date, toDate);
+
+    const result = await request.query(query);
+
+    // Create Excel
+    const workbook = new ExcelJS.Workbook();
+    const worksheet = workbook.addWorksheet("Report");
+
+    const data = result.recordset;
+
+    if (data.length > 0) {
+      worksheet.columns = Object.keys(data[0]).map(key => ({
+        header: key,
+        key: key,
+        width: 20
+      }));
+
+      data.forEach(row => worksheet.addRow(row));
+    }
+
+    res.setHeader(
+      "Content-Type",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    );
+
+    res.setHeader(
+      "Content-Disposition",
+      "attachment; filename=ExpenseReport.xlsx"
+    );
+
+    await workbook.xlsx.write(res);
+    res.end();
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).send("Error exporting Excel");
+  }
+});
 module.exports = router;
