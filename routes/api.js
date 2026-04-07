@@ -373,6 +373,7 @@ router.get("/voucher", async (req, res) => {
         return res.status(500).json({ error: err.message });
     }
 });
+
 router.get("/categories", async (req, res) => {
     console.log("Fetching categories...");
     try {
