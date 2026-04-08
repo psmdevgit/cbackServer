@@ -25,7 +25,7 @@ router.post("/login", async (req, res) => {
                 data: result.recordset[0]
             });
         } else {
-            return res.status(401).json({
+            return res.json({
                 status: "fail",
                 message: "Invalid username or password"
             });
@@ -71,6 +71,8 @@ router.get("/last-entry-date", async (req, res) => {
     const pool = await getConnection();
     const { branch } = req.query;
 
+    console.log(branch);
+
     const result = await pool.request()
       .input("Branch", sql.VarChar, branch)
       .query(`
@@ -82,6 +84,7 @@ router.get("/last-entry-date", async (req, res) => {
 
     if (result.recordset.length > 0) {
       res.json({ lastDate: result.recordset[0].ToDate });
+      console.log(result.recordset[0].ToDate)
     } else {
       res.json({ lastDate: null });
     }
@@ -91,6 +94,38 @@ router.get("/last-entry-date", async (req, res) => {
     res.status(500).send("Error fetching last entry date");
   }
 });
+
+router.get("/branch-opening", async (req, res) => {
+  try {
+    const pool = await getConnection();
+    const { branch } = req.query;
+
+    const result = await pool.request()
+      .input("branch", sql.VarChar, branch)
+      .query(`
+        SELECT OpeningBalance 
+        FROM BranchOpeningBalance 
+        WHERE Branch = @branch
+      `);
+
+      console.log(result.recordset[0])
+
+    if (result.recordset.length > 0) {
+      res.json({
+        opening: result.recordset[0].OpeningBalance
+      });
+    } else {
+      res.json({ opening: 0 });
+    }
+
+  } catch (err) {
+    console.log(err);
+    res.status(500).json({
+      message: "Error fetching branch opening"
+    });
+  }
+});
+
 
 const getEmpCode = async (pool, voucherNo) => {
   const result = await pool.request()
@@ -594,6 +629,8 @@ router.get("/inventory/:branch", async (req, res) => {
 
   const { fromDate, toDate } = req.query;
 
+  console.log("open ",req.params.branch);
+
   try {
     const request = pool.request()
       .input("Branch", sql.VarChar, req.params.branch);
@@ -903,27 +940,27 @@ router.get("/cash-summary", async (req, res) => {
 });
 
 
-router.post("/cash-entry", async (req, res) => {
-  const { fromDate, toDate, opening, expenses, suspense, handCash, userbranch} = req.body;
-  const pool = await getConnection();
+// router.post("/cash-entry", async (req, res) => {
+//   const { fromDate, toDate, opening, expenses, suspense, handCash, userbranch} = req.body;
+//   const pool = await getConnection();
 
-  await pool.request()
-    .input("fromDate", sql.Date, fromDate)
-    .input("toDate", sql.Date, toDate)
-    .input("opening", sql.Decimal, opening)
-    .input("expenses", sql.Decimal, expenses)
-    .input("suspense", sql.Decimal, suspense)
-    .input("handCash", sql.Decimal, handCash)
-    .input("status", sql.VarChar, "Pending L1")
-    .input("branch", sql.VarChar, userbranch)
-    .query(`
-      INSERT INTO CashEntry
-      (FromDate, ToDate, Opening, Expenses, Suspense, HandCash, Status, Branch)
-      VALUES (@fromDate, @toDate, @opening, @expenses, @suspense, @handCash, @status, @branch)
-    `);
+//   await pool.request()
+//     .input("fromDate", sql.Date, fromDate)
+//     .input("toDate", sql.Date, toDate)
+//     .input("opening", sql.Decimal, opening)
+//     .input("expenses", sql.Decimal, expenses)
+//     .input("suspense", sql.Decimal, suspense)
+//     .input("handCash", sql.Decimal, handCash)
+//     .input("status", sql.VarChar, "Pending L1")
+//     .input("branch", sql.VarChar, userbranch)
+//     .query(`
+//       INSERT INTO CashEntry
+//       (FromDate, ToDate, Opening, Expenses, Suspense, HandCash, Status, Branch)
+//       VALUES (@fromDate, @toDate, @opening, @expenses, @suspense, @handCash, @status, @branch)
+//     `);
 
-  res.send("Saved");
-});
+//   res.send("Saved");
+// });
 
 
 // router.get("/cash-entry-list", async (req, res) => {
@@ -971,6 +1008,75 @@ router.post("/cash-entry", async (req, res) => {
 //     });
 //   }
 // });
+
+router.post("/cash-entry", async (req, res) => {
+  const {
+    fromDate,
+    toDate,
+    opening,
+    expenses,
+    suspense,
+    handCash,
+    userbranch,
+    denominationArray
+  } = req.body;
+
+  const pool = await getConnection();
+
+  try {
+    // 🔹 1. Insert CashEntry and get EntryID
+    const result = await pool.request()
+      .input("fromDate", sql.Date, fromDate)
+      .input("toDate", sql.Date, toDate)
+      .input("opening", sql.Decimal(18,2), opening)
+      .input("expenses", sql.Decimal(18,2), expenses)
+      .input("suspense", sql.Decimal(18,2), suspense)
+      .input("handCash", sql.Decimal(18,2), handCash)
+      .input("status", sql.VarChar, "Pending L1")
+      .input("branch", sql.VarChar, userbranch)
+      .query(`
+        INSERT INTO CashEntry
+        (FromDate, ToDate, Opening, Expenses, Suspense, HandCash, Status, Branch)
+        OUTPUT INSERTED.Id
+        VALUES (@fromDate, @toDate, @opening, @expenses, @suspense, @handCash, @status, @branch)
+      `);
+
+    const entryId = result.recordset[0].Id;
+
+    console.log("✅ EntryID:", entryId);
+
+    // 🔹 2. Convert array → object
+    const denomMap = {};
+    denominationArray.forEach(d => {
+      denomMap[d.denomination] = d.count;
+    });
+
+    console.log(entryId);
+
+    // 🔹 3. Insert Denomination (SINGLE ROW)
+    await pool.request()
+      .input("EntryID", sql.Int, entryId)
+      .input("d500", sql.Int, denomMap[500] || 0)
+      .input("d200", sql.Int, denomMap[200] || 0)
+      .input("d100", sql.Int, denomMap[100] || 0)
+      .input("d50", sql.Int, denomMap[50] || 0)
+      .input("d20", sql.Int, denomMap[20] || 0)
+      .input("d10", sql.Int, denomMap[10] || 0)
+      .input("d1", sql.Int, denomMap[1] || 0)
+      .query(`
+        INSERT INTO cashdenomination
+        (EntryID, [500], [200], [100], [50], [20], [10], [1])
+        VALUES
+        (@EntryID, @d500, @d200, @d100, @d50, @d20, @d10, @d1)
+      `);
+
+    res.send("✅ Saved Successfully");
+
+  } catch (err) {
+    console.error("❌ Error:", err);
+    res.status(500).send("Error saving data");
+  }
+});
 
 
 router.get("/cash-entry-list", async (req, res) => {
@@ -1197,19 +1303,36 @@ router.post("/expense-report", async (req, res) => {
   try {
 
     console.log("Generating expense report with filters:", req.body);
+
     const { branch, category, fromDate, toDate } = req.body;
+
+    console.log("passing : ",req.body)
 
     const pool = await getConnection();
 
     // Step 1: Get dynamic branches
     let branchQuery = `
       SELECT DISTINCT Branch 
-      FROM CashboxExpenses
+      FROM CashboxExpenses 
     `;
 
     const branchResult = await pool.request().query(branchQuery);
 
-    const branches = branchResult.recordset.map(b => `[${b.Branch}]`).join(",");
+    // const branches = branchResult.recordset.map(b => `[${b.Branch}]`).join(",");
+
+    let branches = "";
+
+      if (branch) {
+        // 👉 If branch selected → only that branch
+        branches = `[${branch}]`;
+      } else {
+        // 👉 If no branch → get all branches from DB
+        branches = branchResult.recordset
+          .map(b => `[${b.Branch}]`)
+          .join(",");
+      }
+
+      console.log("check : ", branches);
 
     // Step 2: Build dynamic pivot query
     let query = `
@@ -1240,6 +1363,8 @@ router.post("/expense-report", async (req, res) => {
     if (toDate) request.input("ToDate", sql.Date, toDate);
 
     const result = await request.query(query);
+
+    console.log("result : ",result.recordset)
 
     res.json(result.recordset);
 
