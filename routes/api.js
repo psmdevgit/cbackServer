@@ -922,20 +922,35 @@ router.get("/cash-summary", async (req, res) => {
       WHERE branch = @branch AND Date BETWEEN @fromDate AND @toDate and Type in('Expenses')
     `);
 
+    const receipt = await pool.request()
+    .input("fromDate", sql.Date, fromDate)
+    .input("toDate", sql.Date, toDate)
+    .input("branch", sql.NVarChar, userbranch)
+    .query(`
+      SELECT ISNULL(SUM(Amount),0) AS total
+      FROM CashBoxExpenses
+      WHERE branch = @branch AND Date BETWEEN @fromDate AND @toDate and Type in('Receipt')
+    `);
+
   const suspense = await pool.request()
     .input("fromDate", sql.Date, fromDate)
     .input("toDate", sql.Date, toDate)
     .input("branch", sql.NVarChar, userbranch)
     .query(`
       SELECT ISNULL(SUM(AdvanceAmount),0) AS total
-      FROM SuspenseEntry
-      WHERE  branch = @branch AND usedAmount = 0 and status is null
-      AND cast(CreatedDate as date) BETWEEN @fromDate AND @toDate
+      FROM SuspenseEntry S
+      join CashboxExpenses C on c.VoucherNo = s.VoucherNo
+      WHERE  s.branch = @branch AND usedAmount = 0 and status is null
+      AND cast(c.Date as date) BETWEEN @fromDate AND @toDate
     `);
+
+    console.log("ex : ",expenses)
+    console.log("sus : ",suspense)
 
   res.json({
     expenses: expenses.recordset[0].total,
-    suspense: suspense.recordset[0].total
+    suspense: suspense.recordset[0].total,
+    receipt: receipt.recordset[0].total
   });
 });
 
